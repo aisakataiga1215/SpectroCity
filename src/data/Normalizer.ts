@@ -1,34 +1,51 @@
-// Normalizer: linear power → dB → clamp → normalize [0,1]
-// Operates on DECIMATED data (already log-binned and time-decimated)
+// Normalizer: linear power → dB → dynamic percentile range → normalize [0,1]
 
 import { DecimatedData } from './Decimator';
 
-export function toDecibels(data: Float32Array, minDb: number, maxDb: number): void {
+function toDecibels(data: Float32Array): Float32Array {
+  const result = new Float32Array(data.length);
   for (let i = 0; i < data.length; i++) {
     const power = Math.max(data[i], 1e-12);
-    const db = 10 * Math.log10(power);
-    data[i] = Math.max(minDb, Math.min(maxDb, db));
+    result[i] = 10 * Math.log10(power);
   }
+  return result;
 }
 
-export function normalizeToRange(data: Float32Array, minDb: number, maxDb: number): void {
-  const range = maxDb - minDb;
-  for (let i = 0; i < data.length; i++) {
-    data[i] = (data[i] - minDb) / range;
-  }
+function percentile(sorted: Float32Array, p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.round((sorted.length - 1) * p);
+  return sorted[idx];
 }
 
 export function processNorm(
   decimated: DecimatedData,
   minDb: number,
-  maxDb: number,
+  _maxDb: number,
 ): DecimatedData {
-  // Operate on a copy to avoid mutating the source
-  const data = new Float32Array(decimated.data);
-  toDecibels(data, minDb, maxDb);
-  normalizeToRange(data, minDb, maxDb);
+  const dbValues = toDecibels(decimated.data);
+
+  const sorted = new Float32Array(dbValues);
+  sorted.sort();
+
+  const ceiling = percentile(sorted, 0.98);  // top 2% clipped, not a fixed 0
+  const floor = Math.max(minDb, percentile(sorted, 0.01));
+
+  const range = ceiling - floor;
+  if (range <= 0) {
+    return {
+      data: new Float32Array(decimated.data.length),
+      numTimeBins: decimated.numTimeBins,
+      numFreqBands: decimated.numFreqBands,
+    };
+  }
+
+  const normalized = new Float32Array(dbValues.length);
+  for (let i = 0; i < normalized.length; i++) {
+    normalized[i] = Math.max(0, Math.min(1, (dbValues[i] - floor) / range));
+  }
+
   return {
-    data,
+    data: normalized,
     numTimeBins: decimated.numTimeBins,
     numFreqBands: decimated.numFreqBands,
   };
